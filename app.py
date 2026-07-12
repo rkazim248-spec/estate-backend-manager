@@ -224,7 +224,6 @@ def delete_transaction(id):
     conn.close()
     return jsonify({"status": "deleted"})
     
-    app = app
 if __name__ == '__main__':
     # Render khud port assign karta hai, agar na mile toh default 5000
     port = int(os.environ.get("PORT", 5000))
