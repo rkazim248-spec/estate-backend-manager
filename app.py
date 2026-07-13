@@ -1,6 +1,7 @@
 import os
-import sqlite3
 import logging
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from groq import Groq
@@ -9,34 +10,41 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("GroqRotator")
 
 app = Flask(__name__)
-CORS(app)
+# Vercel aur CORS ke issues se bachne ke liye details options enable kiye hain
+CORS(app, resources={r"/api/*": {"origins": "*", "methods": ["GET", "POST", "DELETE", "OPTIONS"]}})
 
-DATABASE = "estate_manager.db"
+@app.before_request
+def handle_options_before_request():
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'success'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+        return response
 
-# Updated Model name according to latest Groq docs
+# Neon PostgreSQL Connection URL (Vercel Environment Variable se aayega)
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://neondb_owner:npg_UoJ4kMmPaz8v@ep-late-pine-ath92cf5.c-9.us-east-1.aws.neon.tech/neondb?sslmode=require")
+
 GROQ_MODEL = "llama-3.1-8b-instant"
-
-# Environment variable se string uthayein (e.g., "key1,key2,key3")
 raw_keys = os.environ.get("GROQ_API_KEYS", "")
 
-# Agar variable mil jaye toh comma se split karke list bana lein, warna khali list
 if raw_keys:
     GROQ_API_KEYS = [key.strip() for key in raw_keys.split(",")]
 else:
-    # Backup ke liye agar Azure par variable set na ho toh khali list ya koi default key
     GROQ_API_KEYS = []
 
 def get_db():
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
+    # RealDictCursor se data bilkul SQLite dictionary format me hi milega
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
 
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
+    # PostgreSQL me AUTOINCREMENT ki jagah SERIAL use hota hai
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS properties (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
             project_name TEXT,
             type TEXT,
@@ -50,7 +58,7 @@ def init_db():
     """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS demands (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             client_name TEXT,
             client_phone TEXT,
             required_type TEXT,
@@ -61,7 +69,7 @@ def init_db():
     """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             property_id INTEGER,
             trans_type TEXT,
             amount REAL,
@@ -70,8 +78,9 @@ def init_db():
         )
     """)
     conn.commit()
+    cursor.close()
     conn.close()
-    logger.info("Database tables verified/created successfully.")
+    logger.info("Database tables verified/created successfully in Neon Postgres.")
 
 init_db()
 
@@ -85,6 +94,7 @@ def get_all_app_data_str():
         demands = [dict(r) for r in cursor.fetchall()]
         cursor.execute("SELECT * FROM transactions")
         txs = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
         conn.close()
         return f"Properties: {str(props)} | Client Demands: {str(demands)} | Financial Ledger Logs: {str(txs)}"
     except Exception as e:
@@ -134,11 +144,16 @@ def get_stats():
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT SUM(amount) FROM transactions WHERE trans_type='Income'")
-    income = cursor.fetchone()[0] or 0
+    income = cursor.fetchone()
+    income_val = income['sum'] if income and income['sum'] is not None else 0
+    
     cursor.execute("SELECT SUM(amount) FROM transactions WHERE trans_type='Expense'")
-    expense = cursor.fetchone()[0] or 0
+    expense = cursor.fetchone()
+    expense_val = expense['sum'] if expense and expense['sum'] is not None else 0
+    
+    cursor.close()
     conn.close()
-    return jsonify({"balance": income - expense})
+    return jsonify({"balance": income_val - expense_val})
 
 @app.route('/api/properties', methods=['GET', 'POST'])
 def handle_properties():
@@ -146,16 +161,19 @@ def handle_properties():
     cursor = conn.cursor()
     if request.method == 'POST':
         d = request.json
+        # SQLite ke "?" ki jagah Postgres me "%s" use hota hai
         cursor.execute(
-            "INSERT INTO properties (title, project_name, type, location, price, owner_name, owner_phone, owner_demand, description) VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO properties (title, project_name, type, location, price, owner_name, owner_phone, owner_demand, description) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (d['title'], d.get('project_name',''), d['type'], d['location'], d['price'], d.get('owner_name',''), d.get('owner_phone',''), d.get('owner_demand',''), d.get('description',''))
         )
         conn.commit()
+        cursor.close()
         conn.close()
         return jsonify({"status": "success"})
     
     cursor.execute("SELECT * FROM properties")
     rows = [dict(r) for r in cursor.fetchall()]
+    cursor.close()
     conn.close()
     return jsonify(rows)
 
@@ -163,8 +181,9 @@ def handle_properties():
 def delete_property(id):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM properties WHERE id=?", (id,))
+    cursor.execute("DELETE FROM properties WHERE id=%s", (id,))
     conn.commit()
+    cursor.close()
     conn.close()
     return jsonify({"status": "deleted"})
 
@@ -175,15 +194,17 @@ def handle_demands():
     if request.method == 'POST':
         d = request.json
         cursor.execute(
-            "INSERT INTO demands (client_name, client_phone, required_type, preferred_location, max_budget, client_demand_notes) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO demands (client_name, client_phone, required_type, preferred_location, max_budget, client_demand_notes) VALUES (%s,%s,%s,%s,%s,%s)",
             (d['client_name'], d['client_phone'], d['required_type'], d['preferred_location'], d['max_budget'], d.get('client_demand_notes',''))
         )
         conn.commit()
+        cursor.close()
         conn.close()
         return jsonify({"status": "success"})
     
     cursor.execute("SELECT * FROM demands")
     rows = [dict(r) for r in cursor.fetchall()]
+    cursor.close()
     conn.close()
     return jsonify(rows)
 
@@ -191,8 +212,9 @@ def handle_demands():
 def delete_demand(id):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM demands WHERE id=?", (id,))
+    cursor.execute("DELETE FROM demands WHERE id=%s", (id,))
     conn.commit()
+    cursor.close()
     conn.close()
     return jsonify({"status": "deleted"})
 
@@ -203,15 +225,17 @@ def handle_transactions():
     if request.method == 'POST':
         d = request.json
         cursor.execute(
-            "INSERT INTO transactions (property_id, trans_type, amount, category, date) VALUES (?,?,?,?,?)",
+            "INSERT INTO transactions (property_id, trans_type, amount, category, date) VALUES (%s,%s,%s,%s,%s)",
             (d['property_id'], d['trans_type'], d['amount'], d['category'], d['date'])
         )
         conn.commit()
+        cursor.close()
         conn.close()
         return jsonify({"status": "success"})
     
     cursor.execute("SELECT * FROM transactions")
     rows = [dict(r) for r in cursor.fetchall()]
+    cursor.close()
     conn.close()
     return jsonify(rows)
 
@@ -219,12 +243,12 @@ def handle_transactions():
 def delete_transaction(id):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM transactions WHERE id=?", (id,))
+    cursor.execute("DELETE FROM transactions WHERE id=%s", (id,))
     conn.commit()
+    cursor.close()
     conn.close()
     return jsonify({"status": "deleted"})
     
 if __name__ == '__main__':
-    # Render khud port assign karta hai, agar na mile toh default 5000
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
