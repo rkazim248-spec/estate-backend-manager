@@ -3,3 +3,4 @@ flask-cors
 groq
 psycopg2-binary==2.9.9
 Flask-CORS==4.0.0
+Flask-SQLAlchemy
