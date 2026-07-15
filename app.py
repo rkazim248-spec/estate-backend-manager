@@ -1,143 +1,291 @@
 import os
-import random
+import logging
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from flask_sqlalchemy import SQLAlchemy
+from groq import Groq
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("GroqRotator")
 
 app = Flask(__name__)
-# CORS enable kiya taake aapka HTML bina kisi security block ke connect ho sake
-CORS(app)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "ali_estate_secure_super_secret_key_2026")
+CORS(app, resources={r"/api/*": {"origins": "*", "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]}})
 
-# --- NEON.COM POSTGRESQL CONFIGURATION ---
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
-    'DATABASE_URL', 
-    'postgresql://neondb_owner:your_password@ep-some-endpoint.eastus2.azure.neon.tech/neondb?sslmode=require'
-)
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+@app.before_request
+def handle_options_before_request():
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'success'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+        return response
 
-db = SQLAlchemy(app)
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://neondb_owner:npg_UoJ4kMmPaz8v@ep-late-pine-ath92cf5.c-9.us-east-1.aws.neon.tech/neondb?sslmode=require")
 
-# --- DATABASE MODELS ---
-class Property(db.Model):
-    __tablename__ = 'properties'
-    id = db.Column(db.BigInteger, primary_key=True)
-    title = db.Column(db.String(200))
-    project_name = db.Column(db.String(200))
-    type = db.Column(db.String(50))
-    price = db.Column(db.Float)
-    location = db.Column(db.String(200))
-    owner_name = db.Column(db.String(100))
-    owner_phone = db.Column(db.String(50))
-    status = db.Column(db.String(50))
-    owner_demand = db.Column(db.String(100))
-    description = db.Column(db.Text)
+GROQ_MODEL = "llama-3.1-8b-instant"
+raw_keys = os.environ.get("GROQ_API_KEYS", "")
 
-class Transaction(db.Model):
-    __tablename__ = 'transactions'
-    id = db.Column(db.BigInteger, primary_key=True)
-    property_id = db.Column(db.String(100))
-    trans_type = db.Column(db.String(50))  # Income / Expense
-    amount = db.Column(db.Float)
-    category = db.Column(db.String(100))
-    date = db.Column(db.String(50))
+if raw_keys:
+    GROQ_API_KEYS = [key.strip() for key in raw_keys.split(",")]
+else:
+    GROQ_API_KEYS = []
 
-# Automatically create tables in Neon if they don't exist
-with app.app_context():
-    db.create_all()
+def get_db():
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    return conn
 
-# --- PROPERTIES API ---
-@app.route('/api/properties', methods=['GET', 'POST'])
-def handle_properties():
-    if request.method == 'POST':
-        data = request.json or {}
-        if data.get("id"):  # Edit Property
-            p_id = int(data.get("id"))
-            prop = Property.query.filter_by(id=p_id).first()
-            if prop:
-                prop.title = data.get("title")
-                prop.project_name = data.get("project_name")
-                prop.type = data.get("type")
-                prop.price = float(data.get("price") or 0)
-                prop.location = data.get("location")
-                prop.owner_name = data.get("owner_name")
-                prop.owner_phone = data.get("owner_phone")
-                prop.status = data.get("status")
-                prop.owner_demand = data.get("owner_demand")
-                prop.description = data.get("description")
-                db.session.commit()
-                return jsonify({"status": "updated", "id": p_id})
-        else:  # New Property
-            new_id = random.randint(100000, 999999)
-            new_prop = Property(
-                id=new_id,
-                title=data.get("title"),
-                project_name=data.get("project_name"),
-                type=data.get("type"),
-                price=float(data.get("price") or 0),
-                location=data.get("location"),
-                owner_name=data.get("owner_name"),
-                owner_phone=data.get("owner_phone"),
-                status=data.get("status", "Available"),
-                owner_demand=data.get("owner_demand"),
-                description=data.get("description")
-            )
-            db.session.add(new_prop)
-            db.session.commit()
-            return jsonify({"status": "created", "id": new_id})
-            
-    # GET Request
-    properties = Property.query.all()
-    return jsonify([{
-        "id": p.id, "title": p.title, "project_name": p.project_name, "type": p.type,
-        "price": p.price, "location": p.location, "owner_name": p.owner_name,
-        "owner_phone": p.owner_phone, "status": p.status, "owner_demand": p.owner_demand,
-        "description": p.description
-    } for p in properties])
-
-@app.route('/api/properties/<int:pid>', methods=['DELETE'])
-def delete_property(pid):
-    prop = Property.query.filter_by(id=pid).first()
-    if prop:
-        db.session.delete(prop)
-        db.session.commit()
-        return jsonify({"success": True})
-    return jsonify({"success": False}), 404
-
-# --- TRANSACTIONS API ---
-@app.route('/api/transactions', methods=['GET', 'POST'])
-def handle_transactions():
-    if request.method == 'POST':
-        data = request.json or {}
-        new_id = random.randint(100000, 999999)
-        new_tx = Transaction(
-            id=new_id,
-            property_id=data.get("property_id"),
-            trans_type=data.get("trans_type"),
-            amount=float(data.get("amount") or 0),
-            category=data.get("category"),
-            date=data.get("date")
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS properties (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            project_name TEXT,
+            type TEXT,
+            location TEXT,
+            price TEXT,
+            owner_name TEXT,
+            owner_phone TEXT,
+            owner_demand TEXT,
+            description TEXT,
+            status TEXT DEFAULT 'Available'
         )
-        db.session.add(new_tx)
-        db.session.commit()
-        return jsonify({"status": "created", "id": new_id})
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS demands (
+            id SERIAL PRIMARY KEY,
+            client_name TEXT,
+            client_phone TEXT,
+            required_type TEXT,
+            preferred_location TEXT,
+            max_budget TEXT,
+            client_demand_notes TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS transactions (
+            id SERIAL PRIMARY KEY,
+            property_id INTEGER,
+            trans_type TEXT,
+            amount REAL,
+            category TEXT,
+            date TEXT
+        )
+    """)
+    # Check if status column exists in properties table (Migration support)
+    try:
+        cursor.execute("ALTER TABLE properties ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Available';")
+    except Exception:
+        pass
         
-    txs = Transaction.query.all()
-    return jsonify([{
-        "id": t.id, "property_id": t.property_id, "trans_type": t.trans_type,
-        "amount": t.amount, "category": t.category, "date": t.date
-    } for t in txs])
+    conn.commit()
+    cursor.close()
+    conn.close()
+    logger.info("Database tables verified/created successfully in Neon Postgres.")
+
+init_db()
+
+def get_all_app_data_str():
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM properties")
+        props = [dict(r) for r in cursor.fetchall()]
+        cursor.execute("SELECT * FROM demands")
+        demands = [dict(r) for r in cursor.fetchall()]
+        cursor.execute("SELECT * FROM transactions")
+        txs = [dict(r) for r in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        return f"Properties: {str(props)} | Client Demands: {str(demands)} | Financial Ledger Logs: {str(txs)}"
+    except Exception as e:
+        logger.error(f"Database read error: {str(e)}")
+        return "Properties: [] | Client Demands: [] | Financial Ledger Logs: []"
+
+@app.route('/api/ai/chat', methods=['POST'])
+def ai_chat():
+    data = request.json
+    user_message = data.get('message', '')
+    if not user_message:
+        return jsonify({"reply": "Hello! I am your AI Consultant. How can I assist you today?"})
+    
+    live_app_context = get_all_app_data_str()
+    system_prompt = (
+        "You are a professional real estate expert assistant for 'Ali Estate Manager Pro'. "
+        "You must communicate strictly in professional, polite, and natural English. "
+        "You have direct real-time access to the live application database supplied below. Analyze it thoroughly "
+        "to answer user questions, cross-match active listings with buyer demands, analyze financial balances, "
+        "or offer tactical estate business advice. Talk like a real human real estate expert, keeping answers structured.\n"
+        f"LIVE APP DATA: {live_app_context}"
+    )
+    
+    last_error_msg = ""
+    for idx, api_key in enumerate(GROQ_API_KEYS):
+        try:
+            logger.info(f"Attempting Chat Completion using API Key Index: {idx}")
+            client = Groq(api_key=api_key)
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ],
+                model=GROQ_MODEL,
+                temperature=0.7
+            )
+            return jsonify({"reply": chat_completion.choices[0].message.content})
+        except Exception as e:
+            logger.warning(f"Key Index {idx} failed. Error: {str(e)}")
+            last_error_msg = str(e)
+            continue
+            
+    return jsonify({"reply": f"All Groq API keys failed. Last error: {last_error_msg}"})
 
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
-    txs = Transaction.query.all()
-    income = sum(t.amount for t in txs if t.trans_type == "Income")
-    expense = sum(t.amount for t in txs if t.trans_type == "Expense")
-    return jsonify({
-        "balance": income - expense,
-        "income": income,
-        "expense": expense
-    })
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT SUM(amount) FROM transactions WHERE trans_type='Income'")
+    income = cursor.fetchone()
+    income_val = income['sum'] if income and income['sum'] is not None else 0
+    
+    cursor.execute("SELECT SUM(amount) FROM transactions WHERE trans_type='Expense'")
+    expense = cursor.fetchone()
+    expense_val = expense['sum'] if expense and expense['sum'] is not None else 0
+    
+    cursor.close()
+    conn.close()
+    return jsonify({"balance": income_val - expense_val})
 
+@app.route('/api/properties', methods=['GET', 'POST'])
+def handle_properties():
+    conn = get_db()
+    cursor = conn.cursor()
+    if request.method == 'POST':
+        d = request.json
+        # Post method handle inline edit fallback if ID is provided
+        if d.get('id'):
+            cursor.execute(
+                "UPDATE properties SET title=%s, project_name=%s, type=%s, location=%s, price=%s, owner_name=%s, owner_phone=%s, owner_demand=%s, description=%s, status=%s WHERE id=%s",
+                (d['title'], d.get('project_name',''), d['type'], d['location'], d['price'], d.get('owner_name',''), d.get('owner_phone',''), d.get('owner_demand',''), d.get('description',''), d.get('status','Available'), int(d['id']))
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO properties (title, project_name, type, location, price, owner_name, owner_phone, owner_demand, description, status) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (d['title'], d.get('project_name',''), d['type'], d['location'], d['price'], d.get('owner_name',''), d.get('owner_phone',''), d.get('owner_demand',''), d.get('description',''), d.get('status','Available'))
+            )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "success"})
+    
+    cursor.execute("SELECT * FROM properties ORDER BY id DESC")
+    rows = [dict(r) for r in cursor.fetchall()]
+    cursor.close()
+    conn.close()
+    return jsonify(rows)
+
+@app.route('/api/properties/<int:id>', methods=['PUT', 'DELETE'])
+def update_delete_property(id):
+    conn = get_db()
+    cursor = conn.cursor()
+    if request.method == 'PUT':
+        d = request.json
+        cursor.execute(
+            "UPDATE properties SET title=%s, project_name=%s, type=%s, location=%s, price=%s, owner_name=%s, owner_phone=%s, owner_demand=%s, description=%s, status=%s WHERE id=%s",
+            (d['title'], d.get('project_name',''), d['type'], d['location'], d['price'], d.get('owner_name',''), d.get('owner_phone',''), d.get('owner_demand',''), d.get('description',''), d.get('status','Available'), id)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "updated"})
+        
+    cursor.execute("DELETE FROM properties WHERE id=%s", (id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return jsonify({"status": "deleted"})
+
+@app.route('/api/demands', methods=['GET', 'POST'])
+def handle_demands():
+    conn = get_db()
+    cursor = conn.cursor()
+    if request.method == 'POST':
+        d = request.json
+        if d.get('id'):
+            cursor.execute(
+                "UPDATE demands SET client_name=%s, client_phone=%s, required_type=%s, preferred_location=%s, max_budget=%s, client_demand_notes=%s WHERE id=%s",
+                (d['client_name'], d['client_phone'], d['required_type'], d['preferred_location'], d['max_budget'], d.get('client_demand_notes',''), int(d['id']))
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO demands (client_name, client_phone, required_type, preferred_location, max_budget, client_demand_notes) VALUES (%s,%s,%s,%s,%s,%s)",
+                (d['client_name'], d['client_phone'], d['required_type'], d['preferred_location'], d['max_budget'], d.get('client_demand_notes',''))
+            )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "success"})
+    
+    cursor.execute("SELECT * FROM demands ORDER BY id DESC")
+    rows = [dict(r) for r in cursor.fetchall()]
+    cursor.close()
+    conn.close()
+    return jsonify(rows)
+
+@app.route('/api/demands/<int:id>', methods=['PUT', 'DELETE'])
+def update_delete_demand(id):
+    conn = get_db()
+    cursor = conn.cursor()
+    if request.method == 'PUT':
+        d = request.json
+        cursor.execute(
+            "UPDATE demands SET client_name=%s, client_phone=%s, required_type=%s, preferred_location=%s, max_budget=%s, client_demand_notes=%s WHERE id=%s",
+            (d['client_name'], d['client_phone'], d['required_type'], d['preferred_location'], d['max_budget'], d.get('client_demand_notes',''), id)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "updated"})
+
+    cursor.execute("DELETE FROM demands WHERE id=%s", (id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return jsonify({"status": "deleted"})
+
+@app.route('/api/transactions', methods=['GET', 'POST'])
+def handle_transactions():
+    conn = get_db()
+    cursor = conn.cursor()
+    if request.method == 'POST':
+        d = request.json
+        cursor.execute(
+            "INSERT INTO transactions (property_id, trans_type, amount, category, date) VALUES (%s,%s,%s,%s,%s)",
+            (d['property_id'], d['trans_type'], d['amount'], d['category'], d['date'])
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "success"})
+    
+    cursor.execute("SELECT * FROM transactions ORDER BY id DESC")
+    rows = [dict(r) for r in cursor.fetchall()]
+    cursor.close()
+    conn.close()
+    return jsonify(rows)
+
+@app.route('/api/transactions/<int:id>', methods=['DELETE'])
+def delete_transaction(id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM transactions WHERE id=%s", (id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return jsonify({"status": "deleted"})
+    
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
