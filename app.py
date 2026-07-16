@@ -14,7 +14,7 @@ logger = logging.getLogger("AliEstateSaaS")
 
 app = Flask(__name__)
 
-# Complete dynamic CORS configuration
+# Dynamic CORS handling for production and local environments
 CORS(app, resources={r"/api/*": {
     "origins": ["http://localhost:5500", "http://127.0.0.1:5500", "*"],
     "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -35,7 +35,7 @@ def get_db():
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
-    # Users System Table (Local Email & Passwords)
+    # Central Users Table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
@@ -45,7 +45,7 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Multi-tenant properties linked with user_email
+    # Multi-tenant tables
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS properties (
             id SERIAL PRIMARY KEY,
@@ -62,7 +62,6 @@ def init_db():
             status TEXT DEFAULT 'Available'
         )
     """)
-    # Multi-tenant demands linked with user_email
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS demands (
             id SERIAL PRIMARY KEY,
@@ -75,7 +74,6 @@ def init_db():
             client_demand_notes TEXT
         )
     """)
-    # Multi-tenant transactions linked with user_email
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
             id SERIAL PRIMARY KEY,
@@ -90,11 +88,11 @@ def init_db():
     conn.commit()
     cursor.close()
     conn.close()
-    logger.info("Database schemas verified for Multi-Tenant architecture.")
+    logger.info("Database system initialised successfully.")
 
 init_db()
 
-# Middleware handler to extract user email context from JWT tokens
+# Middleware handler to verify tokens
 def get_auth_user():
     auth_header = request.headers.get('Authorization', None)
     if not auth_header:
@@ -106,7 +104,7 @@ def get_auth_user():
     except Exception:
         return None
 
-# Browser preflight dynamic options handler for secure local testing
+# Preflight dynamic handler
 @app.before_request
 def handle_options_preflight():
     if request.method == 'OPTIONS':
@@ -122,7 +120,7 @@ def handle_options_preflight():
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         return response, 200
 
-# --- AUTHENTICATION API SYSTEM (Secure Email/Password Only) ---
+# --- SECURE LOCAL AUTHENTICATION API SYSTEM ---
 
 @app.route('/api/auth/signup', methods=['POST'])
 def auth_signup():
@@ -131,7 +129,6 @@ def auth_signup():
     password = data.get('password', '')
     name = data.get('name', '').strip() or 'User'
     
-    # Validation Check
     if not email or not password:
         return jsonify({"error": "Email and password are required."}), 400
         
@@ -177,7 +174,7 @@ def auth_signin():
     else:
         return jsonify({"error": "Incorrect email or password."}), 401
 
-# --- TENANT ISOLATED CORE ROUTING DATA WORKSPACE ---
+# --- MULTI-TENANT PROPERTY & DATA SYSTEM ---
 
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
@@ -351,7 +348,7 @@ def ai_chat():
     data = request.json
     user_message = data.get('message', '')
     if not user_message:
-        return jsonify({"reply": "Hello! How can I help you today?"})
+        return jsonify({"reply": "Hello! I am your estate workspace assistant. Ask me anything!"})
     
     conn = get_db()
     cursor = conn.cursor()
@@ -367,7 +364,7 @@ def ai_chat():
     live_app_context = f"Properties: {str(props)} | Client Demands: {str(demands)} | Financial Logs: {str(txs)}"
     system_prompt = (
         f"You are the personalized estate assistant for workspace owner account: {email}. "
-        f"Analyze their unique datasets politely and expertly. Never share data outside this sandbox.\n"
+        f"Analyze their datasets politely. Never leak information outside this database sandbox.\n"
         f"CURRENT ACCOUNT CONTEXT: {live_app_context}"
     )
     
@@ -384,7 +381,7 @@ def ai_chat():
             last_error_msg = str(e)
             continue
             
-    return jsonify({"reply": f"AI Processing delayed. Error log: {last_error_msg}"})
+    return jsonify({"reply": f"AI Engine delayed. Error log: {last_error_msg}"})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
