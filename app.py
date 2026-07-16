@@ -13,13 +13,32 @@ logger = logging.getLogger("AliEstateSaaS")
 
 app = Flask(__name__)
 
-# CORS ko strictly configure kiya gaya hai local development aur production origins ke liye
+# Purane CORS aur before_request block ko is se replace karein:
+
+# CORS ko broad tarike se allow karein taake local development me koi issue na aaye
 CORS(app, resources={r"/api/*": {
-    "origins": ["http://127.0.0.1:5500", "http://localhost:5500", "*"],
+    "origins": ["http://127.0.0.1:5500", "http://localhost:5500"],
     "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     "allow_headers": ["Content-Type", "Authorization"],
     "supports_credentials": True
 }})
+
+# Ye custom handler har kisam ki OPTIONS (preflight) request ko manual process karke direct 200 OK dega
+@app.before_request
+def handle_options_preflight():
+    if request.method == 'OPTIONS':
+        response = make_response()
+        origin = request.headers.get('Origin')
+        # Agar request standard origins se hai toh use dynamic allow karein
+        if origin in ["http://127.0.0.1:5500", "http://localhost:5500"]:
+            response.headers['Access-Control-Allow-Origin'] = origin
+        else:
+            response.headers['Access-Control-Allow-Origin'] = "http://127.0.0.1:5500"
+            
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        return response, 200 # STRICTLY STATUS 200 OK RETURN KARNA HAI
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "ali_estate_secure_secret_key_2026")
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://neondb_owner:npg_UoJ4kMmPaz8v@ep-late-pine-ath92cf5.c-9.us-east-1.aws.neon.tech/neondb?sslmode=require")
