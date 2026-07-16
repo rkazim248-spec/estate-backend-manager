@@ -7,37 +7,20 @@ from flask_cors import CORS
 from groq import Groq
 import jwt
 import datetime
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("AliEstateSaaS")
 
 app = Flask(__name__)
 
-# 1. CORS setting ko update karein
+# Complete dynamic CORS configuration
 CORS(app, resources={r"/api/*": {
-    "origins": ["http://localhost:5500", "http://127.0.0.1:5500"],
+    "origins": ["http://localhost:5500", "http://127.0.0.1:5500", "*"],
     "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     "allow_headers": ["Content-Type", "Authorization"],
     "supports_credentials": True
 }})
-
-# 2. Options preflight check ko dynamic banayein
-@app.before_request
-def handle_options_preflight():
-    if request.method == 'OPTIONS':
-        response = make_response()
-        # Request kis origin se aa rahi hai (localhost ya 127.0.0.1) usko dynamically read karein
-        origin = request.headers.get('Origin')
-        
-        if origin in ["http://localhost:5500", "http://127.0.0.1:5500"]:
-            response.headers['Access-Control-Allow-Origin'] = origin
-        else:
-            response.headers['Access-Control-Allow-Origin'] = "http://localhost:5500" # fallback
-            
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-        response.headers['Access-Control-Allow-Credentials'] = 'true'
-        return response, 200
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "ali_estate_secure_secret_key_2026")
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://neondb_owner:npg_UoJ4kMmPaz8v@ep-late-pine-ath92cf5.c-9.us-east-1.aws.neon.tech/neondb?sslmode=require")
@@ -52,12 +35,12 @@ def get_db():
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
-    # Users System Table
+    # Users System Table (Local Email & Passwords)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
             email TEXT UNIQUE NOT NULL,
-            password TEXT,
+            password TEXT NOT NULL,
             name TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -123,29 +106,41 @@ def get_auth_user():
     except Exception:
         return None
 
-# Browser ki auto preflight (OPTIONS) request ko clean response dene ke liye
+# Browser preflight dynamic options handler for secure local testing
 @app.before_request
 def handle_options_preflight():
     if request.method == 'OPTIONS':
-        response = make_response(jsonify({'status': 'success'}), 200)
-        origin = request.headers.get('Origin', '*')
-        response.headers['Access-Control-Allow-Origin'] = origin
+        response = make_response()
+        origin = request.headers.get('Origin')
+        if origin in ["http://localhost:5500", "http://127.0.0.1:5500"]:
+            response.headers['Access-Control-Allow-Origin'] = origin
+        else:
+            response.headers['Access-Control-Allow-Origin'] = "http://localhost:5500"
+            
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
         response.headers['Access-Control-Allow-Credentials'] = 'true'
-        return response
+        return response, 200
 
-# --- AUTHENTICATION API SYSTEM ---
+# --- AUTHENTICATION API SYSTEM (Secure Email/Password Only) ---
 
 @app.route('/api/auth/signup', methods=['POST'])
 def auth_signup():
     data = request.json
     email = data.get('email', '').strip().lower()
     password = data.get('password', '')
-    name = data.get('name', 'User')
+    name = data.get('name', '').strip() or 'User'
     
+    # Validation Check
     if not email or not password:
-        return jsonify({"error": "Email and password are required"}), 400
+        return jsonify({"error": "Email and password are required."}), 400
+        
+    email_regex = r"^[^\s@]+@[^\s@]+\.[^\s@]+$"
+    if not re.match(email_regex, email):
+        return jsonify({"error": "Invalid email format."}), 400
+        
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters long."}), 400
         
     conn = get_db()
     cursor = conn.cursor()
@@ -155,7 +150,7 @@ def auth_signup():
         token = jwt.encode({"email": email, "exp": datetime.datetime.utcnow() + datetime.timedelta(days=7)}, JWT_SECRET, algorithm="HS256")
         return jsonify({"token": token, "email": email, "name": name})
     except psycopg2.errors.UniqueViolation:
-        return jsonify({"error": "Account with this email already exists"}), 400
+        return jsonify({"error": "An account with this email already exists."}), 400
     finally:
         cursor.close()
         conn.close()
@@ -165,6 +160,9 @@ def auth_signin():
     data = request.json
     email = data.get('email', '').strip().lower()
     password = data.get('password', '')
+    
+    if not email or not password:
+        return jsonify({"error": "Email and password are required."}), 400
     
     conn = get_db()
     cursor = conn.cursor()
@@ -177,29 +175,7 @@ def auth_signin():
         token = jwt.encode({"email": email, "exp": datetime.datetime.utcnow() + datetime.timedelta(days=7)}, JWT_SECRET, algorithm="HS256")
         return jsonify({"token": token, "email": email, "name": user['name']})
     else:
-        return jsonify({"error": "Invalid email credentials or password"}), 401
-
-@app.route('/api/auth/google', methods=['POST'])
-def auth_google():
-    data = request.json
-    email = data.get('email', '').strip().lower()
-    name = data.get('name', 'Google User')
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE email=%s", (email, ))
-    user = cursor.fetchone()
-    
-    if not user:
-        # Create fresh placeholder tenant row instantly if first time logging via Google federation
-        cursor.execute("INSERT INTO users (email, password, name) VALUES (%s, %s, %s)", (email, 'google_oauth_fallback_pass_2026', name))
-        conn.commit()
-        
-    cursor.close()
-    conn.close()
-    
-    token = jwt.encode({"email": email, "exp": datetime.datetime.utcnow() + datetime.timedelta(days=7)}, JWT_SECRET, algorithm="HS256")
-    return jsonify({"token": token, "email": email, "name": name})
+        return jsonify({"error": "Incorrect email or password."}), 401
 
 # --- TENANT ISOLATED CORE ROUTING DATA WORKSPACE ---
 
@@ -375,9 +351,8 @@ def ai_chat():
     data = request.json
     user_message = data.get('message', '')
     if not user_message:
-        return jsonify({"reply": "Hello! I am your isolated AI Workspace consultant. How can I help you today?"})
+        return jsonify({"reply": "Hello! How can I help you today?"})
     
-    # AI reads ONLY this logged-in tenant's specific tracking database records
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM properties WHERE user_email=%s", (email,))
@@ -392,7 +367,7 @@ def ai_chat():
     live_app_context = f"Properties: {str(props)} | Client Demands: {str(demands)} | Financial Logs: {str(txs)}"
     system_prompt = (
         f"You are the personalized estate assistant for workspace owner account: {email}. "
-        "Analyze their unique datasets politely and expertly. Never share data outside this sandbox scope.\n"
+        f"Analyze their unique datasets politely and expertly. Never share data outside this sandbox.\n"
         f"CURRENT ACCOUNT CONTEXT: {live_app_context}"
     )
     
